@@ -6,7 +6,16 @@
     "build": "react-router build",
     "dev": "react-router dev",
     "start": "react-router-serve ./build/server/index.js",
-    "typecheck": "react-router typegen && tsc"
+    "typecheck": "react-router typegen && tsc",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "db:down:volumes": "docker compose down -v",
+    "db:logs": "docker compose logs -f db",
+    "db:ps": "docker compose ps",
+    "db:ready": "docker compose exec db pg_isready -U budget_user -d budget_app",
+    "db:reset:migrate": "bash ./scripts/db-reset-and-migrate.sh",
+    "prisma:validate": "prisma validate",
+    "prisma:migrate:status": "prisma migrate status"
   },
   "dependencies": {
     "@prisma/client": "^7.4.2",
