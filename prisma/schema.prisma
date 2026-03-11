@@ -73,13 +73,13 @@ model Transaction {
 model Budget {
   id         String      @id @default(uuid())
   userId     String
-  categoryId String?
+  categoryId String
   amount     Decimal     @db.Decimal(12, 2)
   month      BudgetMonth
   year       Int
   createdAt  DateTime    @default(now())
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  category   Category?   @relation(fields: [categoryId, userId], references: [id, userId])
+  category   Category    @relation(fields: [categoryId, userId], references: [id, userId], onDelete: Restrict)
   @@index([userId, year, month])
   @@index([userId, categoryId])
   @@unique([userId, categoryId, month, year])
