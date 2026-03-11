@@ -14,6 +14,7 @@ Commands:
 pnpm db:up
 pnpm db:ps
 pnpm db:ready
+pnpm db:seed
 pnpm prisma:migrate:status
 pnpm db:logs
 pnpm db:down
