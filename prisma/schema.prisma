@@ -60,13 +60,14 @@ model Transaction {
   categoryId  String
   amount      Decimal         @db.Decimal(12, 2)
   type        TransactionType
-  description String
+  description String          @db.VarChar(255)
   date        DateTime
   createdAt   DateTime        @default(now())
   user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  category    Category        @relation(fields: [categoryId, userId], references: [id, userId])
+  category    Category        @relation(fields: [categoryId, userId], references: [id, userId], onDelete: Restrict)
   @@index([userId, date])
   @@index([userId, categoryId])
+  @@index([userId, type, date])
 }
 
 model Budget {
