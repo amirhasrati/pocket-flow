@@ -1,8 +1,8 @@
-import type { Prisma } from "../../generated/prisma/client";
-import { TransactionType } from "../../generated/prisma/client";
+import { Prisma, TransactionType } from "../../generated/prisma/client";
 import { db } from "~/lib/db.server";
 
 const DEFAULT_PAGE_SIZE = 20;
+const DATE_INPUT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 type GetTransactionsPageArgs = {
 	page?: number;
@@ -10,6 +10,15 @@ type GetTransactionsPageArgs = {
 	q?: string;
 	type?: string | null;
 	userEmail: string;
+};
+
+type CreateTransactionArgs = {
+	userEmail: string;
+	categoryId: string;
+	amount: number | string;
+	type: TransactionType;
+	description: string;
+	date: Date | string;
 };
 
 function normalizePage(page?: number) {
@@ -36,6 +45,67 @@ function normalizeTransactionType(type?: string | null) {
 	return null;
 }
 
+function parseTransactionDate(date: Date | string) {
+	if (date instanceof Date) {
+		if (Number.isNaN(date.getTime())) {
+			return null;
+		}
+
+		return date;
+	}
+
+	const trimmedDate = date.trim();
+	const matchedDate = DATE_INPUT_PATTERN.exec(trimmedDate);
+
+	if (matchedDate) {
+		const [, year, month, day] = matchedDate;
+		const normalizedDate = new Date(
+			Date.UTC(Number(year), Number(month) - 1, Number(day)),
+		);
+
+		if (
+			normalizedDate.getUTCFullYear() === Number(year) &&
+			normalizedDate.getUTCMonth() === Number(month) - 1 &&
+			normalizedDate.getUTCDate() === Number(day)
+		) {
+			return normalizedDate;
+		}
+
+		return null;
+	}
+
+	const normalizedDate = new Date(trimmedDate);
+	if (Number.isNaN(normalizedDate.getTime())) {
+		return null;
+	}
+
+	return normalizedDate;
+}
+
+function formatLocalDateKey(date: Date) {
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+
+	return `${year}-${month}-${day}`;
+}
+
+function getTodayDateKey() {
+	return formatLocalDateKey(new Date());
+}
+
+function getTransactionDateKey(inputDate: Date | string, normalizedDate: Date) {
+	if (typeof inputDate === "string") {
+		const trimmedDate = inputDate.trim();
+
+		if (DATE_INPUT_PATTERN.test(trimmedDate)) {
+			return trimmedDate;
+		}
+	}
+
+	return formatLocalDateKey(normalizedDate);
+}
+
 export async function getTransactionsPage({
 	page,
 	pageSize,
@@ -55,6 +125,7 @@ export async function getTransactionsPage({
 
 	if (!user) {
 		return {
+			categories: [],
 			filters: {
 				page: 1,
 				q: normalizedQuery,
@@ -97,10 +168,20 @@ export async function getTransactionsPage({
 			: {}),
 	};
 
+	const categories = await db.category.findMany({
+		where: { userId: user.id },
+		orderBy: { name: "asc" },
+		select: {
+			id: true,
+			name: true,
+		},
+	});
+
 	const totalCount = await db.transaction.count({ where });
 	const totalPages =
 		totalCount === 0 ? 0 : Math.ceil(totalCount / normalizedPageSize);
-	const currentPage = totalPages === 0 ? 1 : Math.min(requestedPage, totalPages);
+	const currentPage =
+		totalPages === 0 ? 1 : Math.min(requestedPage, totalPages);
 	const skip = (currentPage - 1) * normalizedPageSize;
 
 	const transactions = await db.transaction.findMany({
@@ -125,6 +206,7 @@ export async function getTransactionsPage({
 	});
 
 	return {
+		categories,
 		filters: {
 			page: currentPage,
 			q: normalizedQuery,
@@ -148,4 +230,85 @@ export async function getTransactionsPage({
 			type: transaction.type,
 		})),
 	};
+}
+
+export async function createTransaction({
+	userEmail,
+	categoryId,
+	amount,
+	type,
+	description,
+	date,
+}: CreateTransactionArgs) {
+	const user = await db.user.findUnique({
+		where: { email: userEmail },
+		select: { id: true },
+	});
+
+	if (!user) throw new Error("User not found");
+
+	const normalizedType = normalizeTransactionType(type);
+	if (!normalizedType) throw new Error("Invalid transaction type");
+
+	const amountInput =
+		typeof amount === "string" ? amount.trim() : amount.toString();
+
+	let normalizedAmount: Prisma.Decimal;
+
+	try {
+		normalizedAmount = new Prisma.Decimal(amountInput);
+	} catch {
+		throw new Error("Amount must be a valid number");
+	}
+
+	if (!normalizedAmount.isFinite()) {
+		throw new Error("Amount must be a valid number");
+	}
+
+	if (normalizedAmount.lte(0)) {
+		throw new Error("Amount must be greater than 0");
+	}
+
+	if (normalizedAmount.decimalPlaces() > 2) {
+		throw new Error("Amount must have at most 2 decimal places");
+	}
+
+	const normalizedDescription = description.trim();
+	if (!normalizedDescription || normalizedDescription.length > 255) {
+		throw new Error("Description must be 1-255 characters");
+	}
+
+	const normalizedDate = parseTransactionDate(date);
+	if (!normalizedDate) {
+		throw new Error("Invalid transaction date");
+	}
+
+	if (
+		getTransactionDateKey(date, normalizedDate) > getTodayDateKey()
+	) {
+		throw new Error("Transaction date cannot be in the future");
+	}
+
+	const category = await db.category.findUnique({
+		where: {
+			id_userId: {
+				id: categoryId,
+				userId: user.id,
+			},
+		},
+		select: { id: true },
+	});
+
+	if (!category) throw new Error("Category not found for user");
+
+	return db.transaction.create({
+		data: {
+			userId: user.id,
+			categoryId,
+			amount: normalizedAmount,
+			type: normalizedType,
+			description: normalizedDescription,
+			date: normalizedDate,
+		},
+	});
 }
