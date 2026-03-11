@@ -24,7 +24,7 @@ export default function Navbar() {
 	return (
 		<nav
 			aria-label="Primary"
-			className="border-b border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950 md:w-72 md:shrink-0 md:border-r md:border-b-0"
+			className="border-b border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950 md:sticky md:top-0 md:h-screen md:w-72 md:shrink-0 md:self-start md:overflow-y-auto md:border-r md:border-b-0"
 		>
 			<div className="flex flex-col gap-4 md:gap-6">
 				<div className="px-1">

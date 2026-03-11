@@ -14,6 +14,7 @@
     "db:ps": "docker compose ps",
     "db:ready": "docker compose exec db pg_isready -U budget_user -d budget_app",
     "db:reset:migrate": "bash ./scripts/db-reset-and-migrate.sh",
+    "db:seed": "prisma db seed",
     "prisma:validate": "prisma validate",
     "prisma:migrate:status": "prisma migrate status"
   },
@@ -35,6 +36,7 @@
     "@types/react-dom": "^19.2.3",
     "prisma": "^7.4.2",
     "tailwindcss": "^4.1.13",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.2",
     "vite": "^7.1.7",
     "vite-tsconfig-paths": "^5.1.4"
