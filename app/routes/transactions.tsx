@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
 	createTransaction,
+	deleteTransaction,
 	editTransaction,
 	getTransactionsPage,
 } from "~/models/transactions.server";
@@ -89,7 +90,13 @@ function editTransactionSchema() {
 			{
 				message: "At least one editable field is required",
 			},
-		);
+			);
+}
+
+function deleteTransactionSchema() {
+	return z.object({
+		transactionId: z.string().trim().min(1, "Transaction is required"),
+	});
 }
 
 type TransactionFormValues = z.infer<ReturnType<typeof createTransactionSchema>>;
@@ -99,11 +106,15 @@ type TransactionFieldErrors = Partial<
 type EditTransactionFormValues = z.infer<
 	ReturnType<typeof editTransactionSchema>
 >;
+type DeleteTransactionFormValues = z.infer<
+	ReturnType<typeof deleteTransactionSchema>
+>;
+type TransactionActionIntent = "create" | "edit" | "delete";
 type TransactionActionErrorData = {
 	status: "error";
 	fieldErrors: TransactionFieldErrors;
 	formError: string | null;
-	intent: "create" | "edit";
+	intent: TransactionActionIntent;
 	modalSession: number;
 };
 type CreateTransactionActionData =
@@ -120,6 +131,14 @@ type EditTransactionActionData =
 			status: "success";
 			editedTransactionId: string;
 			intent: "edit";
+			modalSession: number;
+	  };
+type DeleteTransactionActionData =
+	| TransactionActionErrorData
+	| {
+			status: "success";
+			deletedTransactionId: string;
+			intent: "delete";
 			modalSession: number;
 	  };
 
@@ -367,11 +386,11 @@ function TransactionFormFields({
 					>
 						{isSubmitting ? submittingLabel : submitLabel}
 					</button>
-					{categories.length === 0 ? (
-						<p className="text-sm text-rose-600 dark:text-rose-400">
-							Create a category before adding transactions.
-						</p>
-					) : null}
+						{categories.length === 0 ? (
+							<p className="text-sm text-rose-600 dark:text-rose-400">
+								Create a category before saving a transaction.
+							</p>
+						) : null}
 					{formError ? (
 						<p className="text-sm text-rose-600 dark:text-rose-400">
 							{formError}
@@ -396,7 +415,62 @@ export function meta(_args: Route.MetaArgs) {
 export async function action({ request }: Route.ActionArgs) {
 	const formData = await request.formData();
 	const modalSession = Number(getFormValue(formData, "modalSession")) || 0;
-	const intent = getFormValue(formData, "intent") === "edit" ? "edit" : "create";
+	const requestedIntent = getFormValue(formData, "intent");
+	const intent: TransactionActionIntent =
+		requestedIntent === "edit" || requestedIntent === "delete"
+			? requestedIntent
+			: "create";
+
+	if (intent === "delete") {
+		const values = {
+			transactionId: getFormValue(formData, "transactionId"),
+		};
+		const result = deleteTransactionSchema().safeParse(values);
+
+		if (!result.success) {
+			const flattened = result.error.flatten();
+			const deleteFieldErrors =
+				flattened.fieldErrors as Partial<
+					Record<keyof DeleteTransactionFormValues, string[]>
+				>;
+
+			return {
+				status: "error" as const,
+				fieldErrors: emptyFieldErrors,
+				formError:
+					deleteFieldErrors.transactionId?.[0] ?? flattened.formErrors[0] ?? null,
+				intent,
+				modalSession,
+			};
+		}
+
+		try {
+			// TODO: Replace the demo fallback with the authenticated user's identity once auth exists.
+			const transaction = await deleteTransaction({
+				userEmail: "demo@pocketflow.local",
+				transactionId: result.data.transactionId,
+			});
+
+			return {
+				status: "success" as const,
+				deletedTransactionId: transaction.id,
+				intent,
+				modalSession,
+			};
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Unable to delete transaction.";
+			const { fieldErrors, formError } = mapTransactionWriteError(message);
+
+			return {
+				status: "error" as const,
+				fieldErrors,
+				formError,
+				intent,
+				modalSession,
+			};
+		}
+	}
 
 	if (intent === "edit") {
 		const values = {
@@ -559,6 +633,7 @@ const dateFormatter = new Intl.DateTimeFormat("en-US", {
 export default function Transactions() {
 	const createTransactionFetcher = useFetcher<typeof action>();
 	const editTransactionFetcher = useFetcher<typeof action>();
+	const deleteTransactionFetcher = useFetcher<typeof action>();
 	const loaderData = useLoaderData<typeof loader>();
 	const [searchParams, setSearchParams] = useSearchParams();
 	const [createModalSession, setCreateModalSession] = useState(0);
@@ -568,6 +643,11 @@ export default function Transactions() {
 		string | null
 	>(null);
 	const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+	const [deleteModalSession, setDeleteModalSession] = useState(0);
+	const [deletingTransactionId, setDeletingTransactionId] = useState<
+		string | null
+	>(null);
+	const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
 	const [toast, setToast] = useState<ToastState | null>(null);
 	const [highlightedTransactionId, setHighlightedTransactionId] = useState<
 		string | null
@@ -575,13 +655,20 @@ export default function Transactions() {
 	const createFormRef = useRef<HTMLFormElement>(null);
 	const lastHandledCreateResultRef = useRef<string | null>(null);
 	const lastHandledEditResultRef = useRef<string | null>(null);
+	const lastHandledDeleteResultRef = useRef<string | null>(null);
 	const isCreateSubmitting = createTransactionFetcher.state !== "idle";
 	const isEditSubmitting = editTransactionFetcher.state !== "idle";
+	const isDeleteSubmitting = deleteTransactionFetcher.state !== "idle";
 	const today = getTodayDateInputValue();
 	const editingTransaction =
 		editingTransactionId === null
 			? null
 			: loaderData.transactions.find((tx) => tx.id === editingTransactionId) ?? null;
+	const deletingTransaction =
+		deletingTransactionId === null
+			? null
+			: loaderData.transactions.find((tx) => tx.id === deletingTransactionId) ??
+				null;
 	const createTransactionResult =
 		createTransactionFetcher.data?.intent === "create" &&
 		createTransactionFetcher.data.modalSession === createModalSession
@@ -607,6 +694,15 @@ export default function Transactions() {
 	const editFormError =
 		editTransactionResult?.status === "error"
 			? editTransactionResult.formError
+			: null;
+	const deleteTransactionResult =
+		deleteTransactionFetcher.data?.intent === "delete" &&
+		deleteTransactionFetcher.data.modalSession === deleteModalSession
+			? (deleteTransactionFetcher.data as DeleteTransactionActionData)
+			: null;
+	const deleteFormError =
+		deleteTransactionResult?.status === "error"
+			? deleteTransactionResult.formError
 			: null;
 	const rangeStart =
 		loaderData.pagination.totalCount === 0
@@ -662,7 +758,9 @@ export default function Transactions() {
 	function openCreateModal() {
 		setCreateModalSession((currentSession) => currentSession + 1);
 		setEditingTransactionId(null);
+		setDeletingTransactionId(null);
 		setIsEditModalOpen(false);
+		setIsDeleteModalOpen(false);
 		setIsCreateModalOpen(true);
 	}
 
@@ -677,7 +775,9 @@ export default function Transactions() {
 	function openEditModal(transactionId: string) {
 		setEditModalSession((currentSession) => currentSession + 1);
 		setEditingTransactionId(transactionId);
+		setDeletingTransactionId(null);
 		setIsCreateModalOpen(false);
+		setIsDeleteModalOpen(false);
 		setIsEditModalOpen(true);
 	}
 
@@ -688,6 +788,24 @@ export default function Transactions() {
 
 		setIsEditModalOpen(false);
 		setEditingTransactionId(null);
+	}
+
+	function openDeleteModal(transactionId: string) {
+		setDeleteModalSession((currentSession) => currentSession + 1);
+		setDeletingTransactionId(transactionId);
+		setIsCreateModalOpen(false);
+		setEditingTransactionId(null);
+		setIsEditModalOpen(false);
+		setIsDeleteModalOpen(true);
+	}
+
+	function closeDeleteModal() {
+		if (isDeleteSubmitting) {
+			return;
+		}
+
+		setIsDeleteModalOpen(false);
+		setDeletingTransactionId(null);
 	}
 
 	useEffect(() => {
@@ -763,6 +881,43 @@ export default function Transactions() {
 	}, [editTransactionResult]);
 
 	useEffect(() => {
+		if (!deleteTransactionResult) {
+			return;
+		}
+
+		if (deleteTransactionResult.status === "success") {
+			const resultKey = `success:${deleteTransactionResult.modalSession}:${deleteTransactionResult.deletedTransactionId}`;
+
+			if (lastHandledDeleteResultRef.current === resultKey) {
+				return;
+			}
+
+			lastHandledDeleteResultRef.current = resultKey;
+			setHighlightedTransactionId((currentId) =>
+				currentId === deleteTransactionResult.deletedTransactionId ? null : currentId,
+			);
+			setIsDeleteModalOpen(false);
+			setDeletingTransactionId(null);
+			setToast({
+				id: Date.now(),
+				kind: "success",
+				message: "Transaction deleted.",
+			});
+			return;
+		}
+
+		if (!deleteTransactionResult.formError) {
+			return;
+		}
+
+		setToast({
+			id: Date.now(),
+			kind: "error",
+			message: deleteTransactionResult.formError,
+		});
+	}, [deleteTransactionResult]);
+
+	useEffect(() => {
 		if (!isEditModalOpen || editingTransaction || isEditSubmitting) {
 			return;
 		}
@@ -770,6 +925,15 @@ export default function Transactions() {
 		setIsEditModalOpen(false);
 		setEditingTransactionId(null);
 	}, [editingTransaction, isEditModalOpen, isEditSubmitting]);
+
+	useEffect(() => {
+		if (!isDeleteModalOpen || deletingTransaction || isDeleteSubmitting) {
+			return;
+		}
+
+		setIsDeleteModalOpen(false);
+		setDeletingTransactionId(null);
+	}, [deletingTransaction, isDeleteModalOpen, isDeleteSubmitting]);
 
 	useEffect(() => {
 		if (!highlightedTransactionId) {
@@ -1013,16 +1177,27 @@ export default function Transactions() {
 												<td className="px-5 py-4 text-sm text-slate-600 dark:text-slate-300">
 													{tx.type === "INCOME" ? "Income" : "Expense"}
 												</td>
-												<td className="px-5 py-4 text-right">
-													<button
-														type="button"
-														onClick={() => {
-															openEditModal(tx.id);
-														}}
-														className="inline-flex min-h-9 items-center justify-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800"
-													>
-														Edit
-													</button>
+												<td className="px-5 py-4">
+													<div className="flex justify-end gap-2">
+														<button
+															type="button"
+															onClick={() => {
+																openEditModal(tx.id);
+															}}
+															className="inline-flex min-h-9 items-center justify-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800"
+														>
+															Edit
+														</button>
+														<button
+															type="button"
+															onClick={() => {
+																openDeleteModal(tx.id);
+															}}
+															className="inline-flex min-h-9 items-center justify-center rounded-lg border border-rose-300 px-3 text-sm font-medium text-rose-700 transition hover:border-rose-400 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:border-rose-800 dark:hover:bg-rose-950/40"
+														>
+															Delete
+														</button>
+													</div>
 												</td>
 											</tr>
 										))
@@ -1138,9 +1313,9 @@ export default function Transactions() {
 						</div>
 					) : null}
 
-					{isEditModalOpen && editingTransaction ? (
-						<div
-							className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+						{isEditModalOpen && editingTransaction ? (
+							<div
+								className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
 							onClick={closeEditModal}
 						>
 							<div
@@ -1220,9 +1395,159 @@ export default function Transactions() {
 									/>
 								</editTransactionFetcher.Form>
 							</div>
-						</div>
-					) : null}
-				</div>
-			</section>
-		);
+							</div>
+						) : null}
+
+						{isDeleteModalOpen && deletingTransaction ? (
+							<div
+								className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+								onClick={closeDeleteModal}
+							>
+								<div
+									role="dialog"
+									aria-modal="true"
+									aria-labelledby="delete-transaction-title"
+									key={deleteModalSession}
+									className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl shadow-slate-950/20 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/40"
+									onClick={(event) => {
+										event.stopPropagation();
+									}}
+								>
+									<div className="flex items-start justify-between gap-4">
+										<div>
+											<h2
+												id="delete-transaction-title"
+												className="text-lg font-semibold text-slate-950 dark:text-slate-100"
+											>
+												Delete Transaction
+											</h2>
+											<p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+												This action cannot be undone.
+											</p>
+										</div>
+										<button
+											type="button"
+											onClick={closeDeleteModal}
+											disabled={isDeleteSubmitting}
+											className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+											aria-label="Close delete transaction dialog"
+										>
+											<svg
+												aria-hidden="true"
+												viewBox="0 0 20 20"
+												className="h-4 w-4"
+											>
+												<path
+													d="m5 5 10 10M15 5 5 15"
+													fill="none"
+													stroke="currentColor"
+													strokeLinecap="round"
+													strokeWidth="1.8"
+												/>
+											</svg>
+										</button>
+									</div>
+
+									<div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950/60">
+										<dl className="grid gap-4 sm:grid-cols-2">
+											<div className="sm:col-span-2">
+												<dt className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+													Description
+												</dt>
+												<dd className="mt-1 text-sm font-medium text-slate-950 dark:text-slate-100">
+													{deletingTransaction.description}
+												</dd>
+											</div>
+											<div>
+												<dt className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+													Category
+												</dt>
+												<dd className="mt-1 text-sm text-slate-700 dark:text-slate-300">
+													{deletingTransaction.category.name}
+												</dd>
+											</div>
+											<div>
+												<dt className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+													Type
+												</dt>
+												<dd className="mt-1 text-sm text-slate-700 dark:text-slate-300">
+													{deletingTransaction.type === "INCOME"
+														? "Income"
+														: "Expense"}
+												</dd>
+											</div>
+											<div>
+												<dt className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+													Date
+												</dt>
+												<dd className="mt-1 text-sm text-slate-700 dark:text-slate-300">
+													{dateFormatter.format(new Date(deletingTransaction.date))}
+												</dd>
+											</div>
+											<div>
+												<dt className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+													Amount
+												</dt>
+												<dd
+													className={`mt-1 text-sm font-semibold ${
+														deletingTransaction.type === "INCOME"
+															? "text-emerald-700 dark:text-emerald-300"
+															: "text-rose-700 dark:text-rose-300"
+													}`}
+												>
+													{deletingTransaction.type === "INCOME" ? "+" : "-"}
+													{currencyFormatter.format(deletingTransaction.amount)}
+												</dd>
+											</div>
+										</dl>
+									</div>
+
+									<deleteTransactionFetcher.Form
+										method="post"
+										className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+									>
+										<input type="hidden" name="intent" value="delete" />
+										<input
+											type="hidden"
+											name="modalSession"
+											value={deleteModalSession}
+										/>
+										<input
+											type="hidden"
+											name="transactionId"
+											value={deletingTransaction.id}
+										/>
+										{deleteFormError ? (
+											<p className="text-sm text-rose-600 dark:text-rose-400">
+												{deleteFormError}
+											</p>
+										) : (
+											<span />
+										)}
+										<div className="flex gap-3 sm:justify-end">
+											<button
+												type="button"
+												onClick={closeDeleteModal}
+												disabled={isDeleteSubmitting}
+												className="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-300 px-4 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800"
+											>
+												Cancel
+											</button>
+											<button
+												type="submit"
+												disabled={isDeleteSubmitting}
+												className="inline-flex min-h-11 items-center justify-center rounded-lg bg-rose-600 px-4 text-sm font-semibold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-rose-500 dark:hover:bg-rose-400"
+											>
+												{isDeleteSubmitting
+													? "Deleting..."
+													: "Delete transaction"}
+											</button>
+										</div>
+									</deleteTransactionFetcher.Form>
+								</div>
+							</div>
+						) : null}
+					</div>
+				</section>
+			);
 }

@@ -32,6 +32,11 @@ type EditTransactionArgs = {
 	updates: TransactionUpdate;
 };
 
+type DeleteTransactionArgs = {
+	transactionId: string;
+	userEmail: string;
+};
+
 function normalizePage(page?: number) {
 	if (!page || Number.isNaN(page) || page < 1) {
 		return 1;
@@ -166,10 +171,7 @@ function normalizeTransactionDate(date: Date | string) {
 	return normalizedDate;
 }
 
-async function assertCategoryBelongsToUser(
-	userId: string,
-	categoryId: string,
-) {
+async function assertCategoryBelongsToUser(userId: string, categoryId: string) {
 	const category = await db.category.findUnique({
 		where: {
 			id_userId: {
@@ -417,4 +419,26 @@ export async function editTransaction({
 		where: { id: transactionId },
 		data,
 	});
+}
+
+export async function deleteTransaction({
+	transactionId,
+	userEmail,
+}: DeleteTransactionArgs) {
+	const user = await db.user.findUnique({
+		where: { email: userEmail },
+		select: { id: true },
+	});
+	if (!user) throw new Error("User not found");
+
+	const result = await db.transaction.deleteMany({
+		where: {
+			id: transactionId,
+			userId: user.id,
+		},
+	});
+
+	if (result.count === 0) throw new Error("Transaction not found for user");
+
+	return { id: transactionId };
 }
