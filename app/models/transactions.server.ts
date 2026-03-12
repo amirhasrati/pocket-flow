@@ -12,13 +12,24 @@ type GetTransactionsPageArgs = {
 	userEmail: string;
 };
 
-type CreateTransactionArgs = {
-	userEmail: string;
+type TransactionInput = {
 	categoryId: string;
 	amount: number | string;
 	type: TransactionType;
 	description: string;
 	date: Date | string;
+};
+
+type CreateTransactionArgs = {
+	userEmail: string;
+} & TransactionInput;
+
+type TransactionUpdate = Partial<TransactionInput>;
+
+type EditTransactionArgs = {
+	transactionId: string;
+	userEmail: string;
+	updates: TransactionUpdate;
 };
 
 function normalizePage(page?: number) {
@@ -104,6 +115,107 @@ function getTransactionDateKey(inputDate: Date | string, normalizedDate: Date) {
 	}
 
 	return formatLocalDateKey(normalizedDate);
+}
+
+function normalizeTransactionAmount(amount: number | string) {
+	const amountInput =
+		typeof amount === "string" ? amount.trim() : amount.toString();
+
+	let normalizedAmount: Prisma.Decimal;
+
+	try {
+		normalizedAmount = new Prisma.Decimal(amountInput);
+	} catch {
+		throw new Error("Amount must be a valid number");
+	}
+
+	if (!normalizedAmount.isFinite()) {
+		throw new Error("Amount must be a valid number");
+	}
+
+	if (normalizedAmount.lte(0)) {
+		throw new Error("Amount must be greater than 0");
+	}
+
+	if (normalizedAmount.decimalPlaces() > 2) {
+		throw new Error("Amount must have at most 2 decimal places");
+	}
+
+	return normalizedAmount;
+}
+
+function normalizeTransactionDescription(description: string) {
+	const normalizedDescription = description.trim();
+	if (!normalizedDescription || normalizedDescription.length > 255) {
+		throw new Error("Description must be 1-255 characters");
+	}
+
+	return normalizedDescription;
+}
+
+function normalizeTransactionDate(date: Date | string) {
+	const normalizedDate = parseTransactionDate(date);
+	if (!normalizedDate) {
+		throw new Error("Invalid transaction date");
+	}
+
+	if (getTransactionDateKey(date, normalizedDate) > getTodayDateKey()) {
+		throw new Error("Transaction date cannot be in the future");
+	}
+
+	return normalizedDate;
+}
+
+async function assertCategoryBelongsToUser(
+	userId: string,
+	categoryId: string,
+) {
+	const category = await db.category.findUnique({
+		where: {
+			id_userId: {
+				id: categoryId,
+				userId,
+			},
+		},
+		select: { id: true },
+	});
+
+	if (!category) throw new Error("Category not found for user");
+}
+
+async function buildTransactionWriteData({
+	userId,
+	updates,
+}: {
+	userId: string;
+	updates: TransactionUpdate;
+}) {
+	const data: Prisma.TransactionUncheckedUpdateInput = {};
+
+	if (updates.type !== undefined) {
+		const normalizedType = normalizeTransactionType(updates.type);
+		if (!normalizedType) throw new Error("Invalid transaction type");
+		data.type = normalizedType;
+	}
+
+	if (updates.amount !== undefined) {
+		data.amount = normalizeTransactionAmount(updates.amount);
+	}
+
+	if (updates.description !== undefined) {
+		data.description = normalizeTransactionDescription(updates.description);
+	}
+
+	if (updates.date !== undefined) {
+		data.date = normalizeTransactionDate(updates.date);
+	}
+
+	if (updates.categoryId !== undefined) {
+		await assertCategoryBelongsToUser(userId, updates.categoryId);
+		data.categoryId = updates.categoryId;
+	}
+
+	return data;
 }
 
 export async function getTransactionsPage({
@@ -246,69 +358,63 @@ export async function createTransaction({
 	});
 
 	if (!user) throw new Error("User not found");
-
-	const normalizedType = normalizeTransactionType(type);
-	if (!normalizedType) throw new Error("Invalid transaction type");
-
-	const amountInput =
-		typeof amount === "string" ? amount.trim() : amount.toString();
-
-	let normalizedAmount: Prisma.Decimal;
-
-	try {
-		normalizedAmount = new Prisma.Decimal(amountInput);
-	} catch {
-		throw new Error("Amount must be a valid number");
-	}
-
-	if (!normalizedAmount.isFinite()) {
-		throw new Error("Amount must be a valid number");
-	}
-
-	if (normalizedAmount.lte(0)) {
-		throw new Error("Amount must be greater than 0");
-	}
-
-	if (normalizedAmount.decimalPlaces() > 2) {
-		throw new Error("Amount must have at most 2 decimal places");
-	}
-
-	const normalizedDescription = description.trim();
-	if (!normalizedDescription || normalizedDescription.length > 255) {
-		throw new Error("Description must be 1-255 characters");
-	}
-
-	const normalizedDate = parseTransactionDate(date);
-	if (!normalizedDate) {
-		throw new Error("Invalid transaction date");
-	}
-
-	if (
-		getTransactionDateKey(date, normalizedDate) > getTodayDateKey()
-	) {
-		throw new Error("Transaction date cannot be in the future");
-	}
-
-	const category = await db.category.findUnique({
-		where: {
-			id_userId: {
-				id: categoryId,
-				userId: user.id,
-			},
+	const data = await buildTransactionWriteData({
+		userId: user.id,
+		updates: {
+			categoryId,
+			amount,
+			type,
+			description,
+			date,
 		},
-		select: { id: true },
 	});
-
-	if (!category) throw new Error("Category not found for user");
 
 	return db.transaction.create({
 		data: {
 			userId: user.id,
-			categoryId,
-			amount: normalizedAmount,
-			type: normalizedType,
-			description: normalizedDescription,
-			date: normalizedDate,
+			categoryId: data.categoryId as string,
+			amount: data.amount as Prisma.Decimal,
+			type: data.type as TransactionType,
+			description: data.description as string,
+			date: data.date as Date,
 		},
+	});
+}
+
+export async function editTransaction({
+	transactionId,
+	userEmail,
+	updates,
+}: EditTransactionArgs) {
+	const user = await db.user.findUnique({
+		where: { email: userEmail },
+		select: { id: true },
+	});
+
+	if (!user) throw new Error("User not found");
+
+	const transaction = await db.transaction.findFirst({
+		where: {
+			id: transactionId,
+			userId: user.id,
+		},
+		select: {
+			id: true,
+		},
+	});
+
+	if (!transaction) throw new Error("Transaction not found for user");
+	if (!Object.values(updates).some((value) => value !== undefined)) {
+		throw new Error("At least one editable field is required");
+	}
+
+	const data = await buildTransactionWriteData({
+		userId: user.id,
+		updates,
+	});
+
+	return db.transaction.update({
+		where: { id: transactionId },
+		data,
 	});
 }

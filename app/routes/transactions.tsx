@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
 	createTransaction,
+	editTransaction,
 	getTransactionsPage,
 } from "~/models/transactions.server";
 
@@ -22,11 +23,27 @@ function formatDateInputValue(date: Date) {
 	return `${year}-${month}-${day}`;
 }
 
+function formatUtcDateInputValue(date: Date) {
+	const year = date.getUTCFullYear();
+	const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+	const day = String(date.getUTCDate()).padStart(2, "0");
+
+	return `${year}-${month}-${day}`;
+}
+
+function formatStoredDateInputValue(date: string) {
+	return formatUtcDateInputValue(new Date(date));
+}
+
+function formatAmountInputValue(amount: number) {
+	return amount.toFixed(2);
+}
+
 function getTodayDateInputValue() {
 	return formatDateInputValue(new Date());
 }
 
-function createTransactionSchema() {
+function transactionFieldSchema() {
 	return z.object({
 		description: z
 			.string()
@@ -52,22 +69,57 @@ function createTransactionSchema() {
 	});
 }
 
-type CreateTransactionFormValues = z.infer<
-	ReturnType<typeof createTransactionSchema>
+function createTransactionSchema() {
+	return transactionFieldSchema();
+}
+
+function editTransactionSchema() {
+	return transactionFieldSchema()
+		.partial()
+		.extend({
+			transactionId: z.string().trim().min(1, "Transaction is required"),
+		})
+		.refine(
+			(value) =>
+				value.description !== undefined ||
+				value.amount !== undefined ||
+				value.categoryId !== undefined ||
+				value.type !== undefined ||
+				value.date !== undefined,
+			{
+				message: "At least one editable field is required",
+			},
+		);
+}
+
+type TransactionFormValues = z.infer<ReturnType<typeof createTransactionSchema>>;
+type TransactionFieldErrors = Partial<
+	Record<keyof TransactionFormValues, string[]>
 >;
-type CreateTransactionFieldErrors = Partial<
-	Record<keyof CreateTransactionFormValues, string[]>
+type EditTransactionFormValues = z.infer<
+	ReturnType<typeof editTransactionSchema>
 >;
+type TransactionActionErrorData = {
+	status: "error";
+	fieldErrors: TransactionFieldErrors;
+	formError: string | null;
+	intent: "create" | "edit";
+	modalSession: number;
+};
 type CreateTransactionActionData =
-	| {
-			status: "error";
-			fieldErrors: CreateTransactionFieldErrors;
-			formError: string | null;
-			modalSession: number;
-	  }
+	| TransactionActionErrorData
 	| {
 			status: "success";
 			createdTransactionId: string;
+			intent: "create";
+			modalSession: number;
+	  };
+type EditTransactionActionData =
+	| TransactionActionErrorData
+	| {
+			status: "success";
+			editedTransactionId: string;
+			intent: "edit";
 			modalSession: number;
 	  };
 
@@ -77,10 +129,33 @@ type ToastState = {
 	message: string;
 };
 
-const emptyFieldErrors: CreateTransactionFieldErrors = {};
+type CategoryOption = {
+	id: string;
+	name: string;
+};
 
-function mapCreateTransactionError(message: string): {
-	fieldErrors: CreateTransactionFieldErrors;
+type TransactionFormDefaults = {
+	amount?: string;
+	categoryId?: string;
+	date?: string;
+	description?: string;
+	type?: TransactionFormValues["type"];
+};
+
+type TransactionFormFieldsProps = {
+	categories: CategoryOption[];
+	defaults: TransactionFormDefaults;
+	fieldErrors: TransactionFieldErrors;
+	formError: string | null;
+	isSubmitting: boolean;
+	submitLabel: string;
+	submittingLabel: string;
+};
+
+const emptyFieldErrors: TransactionFieldErrors = {};
+
+function mapTransactionWriteError(message: string): {
+	fieldErrors: TransactionFieldErrors;
 	formError: string | null;
 } {
 	switch (message) {
@@ -112,6 +187,16 @@ function mapCreateTransactionError(message: string): {
 				fieldErrors: { categoryId: ["Category is no longer available"] },
 				formError: null,
 			};
+		case "Transaction not found for user":
+			return {
+				fieldErrors: emptyFieldErrors,
+				formError: "Transaction is no longer available.",
+			};
+		case "At least one editable field is required":
+			return {
+				fieldErrors: emptyFieldErrors,
+				formError: message,
+			};
 		default:
 			return {
 				fieldErrors: emptyFieldErrors,
@@ -123,6 +208,179 @@ function mapCreateTransactionError(message: string): {
 function getFormValue(formData: FormData, name: string) {
 	const value = formData.get(name);
 	return typeof value === "string" ? value : "";
+}
+
+function getOptionalFormValue(formData: FormData, name: string) {
+	const value = formData.get(name);
+	return typeof value === "string" ? value : undefined;
+}
+
+function TransactionFormFields({
+	categories,
+	defaults,
+	fieldErrors,
+	formError,
+	isSubmitting,
+	submitLabel,
+	submittingLabel,
+}: TransactionFormFieldsProps) {
+	return (
+		<>
+			<label className="space-y-2 lg:col-span-2">
+				<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+					Description
+				</span>
+				<input
+					type="text"
+					name="description"
+					defaultValue={defaults.description ?? ""}
+					aria-invalid={fieldErrors.description ? true : undefined}
+					className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+				/>
+				{fieldErrors.description?.[0] ? (
+					<p className="text-sm text-rose-600 dark:text-rose-400">
+						{fieldErrors.description[0]}
+					</p>
+				) : null}
+			</label>
+
+			<label className="space-y-2">
+				<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+					Amount
+				</span>
+				<input
+					type="text"
+					name="amount"
+					inputMode="decimal"
+					placeholder="0.00"
+					defaultValue={defaults.amount ?? ""}
+					aria-invalid={fieldErrors.amount ? true : undefined}
+					className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+				/>
+				{fieldErrors.amount?.[0] ? (
+					<p className="text-sm text-rose-600 dark:text-rose-400">
+						{fieldErrors.amount[0]}
+					</p>
+				) : null}
+			</label>
+
+			<label className="space-y-2">
+				<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+					Category
+				</span>
+				<div className="relative">
+					<select
+						name="categoryId"
+						defaultValue={defaults.categoryId ?? ""}
+						aria-invalid={fieldErrors.categoryId ? true : undefined}
+						className="w-full appearance-none rounded-lg border border-slate-300 bg-white px-4 py-3 pr-11 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+					>
+						<option value="">Select a category</option>
+						{categories.map((category) => (
+							<option key={category.id} value={category.id}>
+								{category.name}
+							</option>
+						))}
+					</select>
+					<svg
+						aria-hidden="true"
+						viewBox="0 0 20 20"
+						className="pointer-events-none absolute top-1/2 right-4 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500"
+					>
+						<path
+							d="M5 7.5 10 12.5 15 7.5"
+							fill="none"
+							stroke="currentColor"
+							strokeLinecap="round"
+							strokeLinejoin="round"
+							strokeWidth="1.8"
+						/>
+					</svg>
+				</div>
+				{fieldErrors.categoryId?.[0] ? (
+					<p className="text-sm text-rose-600 dark:text-rose-400">
+						{fieldErrors.categoryId[0]}
+					</p>
+				) : null}
+			</label>
+
+			<label className="space-y-2">
+				<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+					Type
+				</span>
+				<div className="relative">
+					<select
+						name="type"
+						defaultValue={defaults.type ?? "EXPENSE"}
+						aria-invalid={fieldErrors.type ? true : undefined}
+						className="w-full appearance-none rounded-lg border border-slate-300 bg-white px-4 py-3 pr-11 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+					>
+						<option value="EXPENSE">Expense</option>
+						<option value="INCOME">Income</option>
+					</select>
+					<svg
+						aria-hidden="true"
+						viewBox="0 0 20 20"
+						className="pointer-events-none absolute top-1/2 right-4 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500"
+					>
+						<path
+							d="M5 7.5 10 12.5 15 7.5"
+							fill="none"
+							stroke="currentColor"
+							strokeLinecap="round"
+							strokeLinejoin="round"
+							strokeWidth="1.8"
+						/>
+					</svg>
+				</div>
+				{fieldErrors.type?.[0] ? (
+					<p className="text-sm text-rose-600 dark:text-rose-400">
+						{fieldErrors.type[0]}
+					</p>
+				) : null}
+			</label>
+
+			<label className="space-y-2">
+				<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+					Date
+				</span>
+				<input
+					type="date"
+					name="date"
+					defaultValue={defaults.date ?? ""}
+					aria-invalid={fieldErrors.date ? true : undefined}
+					className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+				/>
+				{fieldErrors.date?.[0] ? (
+					<p className="text-sm text-rose-600 dark:text-rose-400">
+						{fieldErrors.date[0]}
+					</p>
+				) : null}
+			</label>
+
+			<div className="flex items-end lg:col-span-2">
+				<div className="flex flex-col gap-3">
+					<button
+						type="submit"
+						disabled={isSubmitting || categories.length === 0}
+						className="inline-flex min-h-12 items-center justify-center rounded-lg bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200 dark:focus:ring-slate-700"
+					>
+						{isSubmitting ? submittingLabel : submitLabel}
+					</button>
+					{categories.length === 0 ? (
+						<p className="text-sm text-rose-600 dark:text-rose-400">
+							Create a category before adding transactions.
+						</p>
+					) : null}
+					{formError ? (
+						<p className="text-sm text-rose-600 dark:text-rose-400">
+							{formError}
+						</p>
+					) : null}
+				</div>
+			</div>
+		</>
+	);
 }
 
 export function meta(_args: Route.MetaArgs) {
@@ -138,6 +396,66 @@ export function meta(_args: Route.MetaArgs) {
 export async function action({ request }: Route.ActionArgs) {
 	const formData = await request.formData();
 	const modalSession = Number(getFormValue(formData, "modalSession")) || 0;
+	const intent = getFormValue(formData, "intent") === "edit" ? "edit" : "create";
+
+	if (intent === "edit") {
+		const values = {
+			transactionId: getFormValue(formData, "transactionId"),
+			description: getOptionalFormValue(formData, "description"),
+			amount: getOptionalFormValue(formData, "amount"),
+			categoryId: getOptionalFormValue(formData, "categoryId"),
+			type: getOptionalFormValue(formData, "type"),
+			date: getOptionalFormValue(formData, "date"),
+		};
+		const result = editTransactionSchema().safeParse(values);
+
+		if (!result.success) {
+			const flattened = result.error.flatten();
+			const editFieldErrors =
+				flattened.fieldErrors as Partial<
+					Record<keyof EditTransactionFormValues, string[]>
+				>;
+			const { transactionId, ...fieldErrors } = editFieldErrors;
+
+			return {
+				status: "error" as const,
+				fieldErrors: fieldErrors as TransactionFieldErrors,
+				formError: transactionId?.[0] ?? flattened.formErrors[0] ?? null,
+				intent,
+				modalSession,
+			};
+		}
+
+		try {
+			const { transactionId, ...updates } = result.data;
+			// TODO: Replace the demo fallback with the authenticated user's identity once auth exists.
+			const transaction = await editTransaction({
+				userEmail: "demo@pocketflow.local",
+				transactionId,
+				updates,
+			});
+
+			return {
+				status: "success" as const,
+				editedTransactionId: transaction.id,
+				intent,
+				modalSession,
+			};
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Unable to edit transaction.";
+			const { fieldErrors, formError } = mapTransactionWriteError(message);
+
+			return {
+				status: "error" as const,
+				fieldErrors,
+				formError,
+				intent,
+				modalSession,
+			};
+		}
+	}
+
 	const values = {
 		description: getFormValue(formData, "description"),
 		amount: getFormValue(formData, "amount"),
@@ -145,15 +463,15 @@ export async function action({ request }: Route.ActionArgs) {
 		type: getFormValue(formData, "type"),
 		date: getFormValue(formData, "date"),
 	};
-
 	const result = createTransactionSchema().safeParse(values);
 
 	if (!result.success) {
 		return {
 			status: "error" as const,
 			fieldErrors:
-				result.error.flatten().fieldErrors as CreateTransactionFieldErrors,
+				result.error.flatten().fieldErrors as TransactionFieldErrors,
 			formError: null,
+			intent,
 			modalSession,
 		};
 	}
@@ -168,17 +486,19 @@ export async function action({ request }: Route.ActionArgs) {
 		return {
 			status: "success" as const,
 			createdTransactionId: transaction.id,
+			intent,
 			modalSession,
 		};
 	} catch (error) {
 		const message =
 			error instanceof Error ? error.message : "Unable to create transaction.";
-		const { fieldErrors, formError } = mapCreateTransactionError(message);
+		const { fieldErrors, formError } = mapTransactionWriteError(message);
 
 		return {
 			status: "error" as const,
 			fieldErrors,
 			formError,
+			intent,
 			modalSession,
 		};
 	}
@@ -238,29 +558,55 @@ const dateFormatter = new Intl.DateTimeFormat("en-US", {
 
 export default function Transactions() {
 	const createTransactionFetcher = useFetcher<typeof action>();
+	const editTransactionFetcher = useFetcher<typeof action>();
 	const loaderData = useLoaderData<typeof loader>();
 	const [searchParams, setSearchParams] = useSearchParams();
 	const [createModalSession, setCreateModalSession] = useState(0);
 	const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+	const [editModalSession, setEditModalSession] = useState(0);
+	const [editingTransactionId, setEditingTransactionId] = useState<
+		string | null
+	>(null);
+	const [isEditModalOpen, setIsEditModalOpen] = useState(false);
 	const [toast, setToast] = useState<ToastState | null>(null);
 	const [highlightedTransactionId, setHighlightedTransactionId] = useState<
 		string | null
 	>(null);
 	const createFormRef = useRef<HTMLFormElement>(null);
-	const lastHandledResultRef = useRef<string | null>(null);
-	const isSubmitting = createTransactionFetcher.state !== "idle";
+	const lastHandledCreateResultRef = useRef<string | null>(null);
+	const lastHandledEditResultRef = useRef<string | null>(null);
+	const isCreateSubmitting = createTransactionFetcher.state !== "idle";
+	const isEditSubmitting = editTransactionFetcher.state !== "idle";
 	const today = getTodayDateInputValue();
+	const editingTransaction =
+		editingTransactionId === null
+			? null
+			: loaderData.transactions.find((tx) => tx.id === editingTransactionId) ?? null;
 	const createTransactionResult =
-		createTransactionFetcher.data?.modalSession === createModalSession
+		createTransactionFetcher.data?.intent === "create" &&
+		createTransactionFetcher.data.modalSession === createModalSession
 			? (createTransactionFetcher.data as CreateTransactionActionData)
 			: null;
-	const fieldErrors =
+	const createFieldErrors =
 		createTransactionResult?.status === "error"
 			? createTransactionResult.fieldErrors
 			: emptyFieldErrors;
-	const formError =
+	const createFormError =
 		createTransactionResult?.status === "error"
 			? createTransactionResult.formError
+			: null;
+	const editTransactionResult =
+		editTransactionFetcher.data?.intent === "edit" &&
+		editTransactionFetcher.data.modalSession === editModalSession
+			? (editTransactionFetcher.data as EditTransactionActionData)
+			: null;
+	const editFieldErrors =
+		editTransactionResult?.status === "error"
+			? editTransactionResult.fieldErrors
+			: emptyFieldErrors;
+	const editFormError =
+		editTransactionResult?.status === "error"
+			? editTransactionResult.formError
 			: null;
 	const rangeStart =
 		loaderData.pagination.totalCount === 0
@@ -315,15 +661,33 @@ export default function Transactions() {
 
 	function openCreateModal() {
 		setCreateModalSession((currentSession) => currentSession + 1);
+		setEditingTransactionId(null);
+		setIsEditModalOpen(false);
 		setIsCreateModalOpen(true);
 	}
 
 	function closeCreateModal() {
-		if (isSubmitting) {
+		if (isCreateSubmitting) {
 			return;
 		}
 
 		setIsCreateModalOpen(false);
+	}
+
+	function openEditModal(transactionId: string) {
+		setEditModalSession((currentSession) => currentSession + 1);
+		setEditingTransactionId(transactionId);
+		setIsCreateModalOpen(false);
+		setIsEditModalOpen(true);
+	}
+
+	function closeEditModal() {
+		if (isEditSubmitting) {
+			return;
+		}
+
+		setIsEditModalOpen(false);
+		setEditingTransactionId(null);
 	}
 
 	useEffect(() => {
@@ -334,11 +698,11 @@ export default function Transactions() {
 		if (createTransactionResult.status === "success") {
 			const resultKey = `success:${createTransactionResult.modalSession}:${createTransactionResult.createdTransactionId}`;
 
-			if (lastHandledResultRef.current === resultKey) {
+			if (lastHandledCreateResultRef.current === resultKey) {
 				return;
 			}
 
-			lastHandledResultRef.current = resultKey;
+			lastHandledCreateResultRef.current = resultKey;
 			createFormRef.current?.reset();
 			setHighlightedTransactionId(
 				createTransactionResult.createdTransactionId,
@@ -362,6 +726,50 @@ export default function Transactions() {
 			message: createTransactionResult.formError,
 		});
 	}, [createTransactionResult]);
+
+	useEffect(() => {
+		if (!editTransactionResult) {
+			return;
+		}
+
+		if (editTransactionResult.status === "success") {
+			const resultKey = `success:${editTransactionResult.modalSession}:${editTransactionResult.editedTransactionId}`;
+
+			if (lastHandledEditResultRef.current === resultKey) {
+				return;
+			}
+
+			lastHandledEditResultRef.current = resultKey;
+			setHighlightedTransactionId(editTransactionResult.editedTransactionId);
+			setIsEditModalOpen(false);
+			setEditingTransactionId(null);
+			setToast({
+				id: Date.now(),
+				kind: "success",
+				message: "Transaction updated.",
+			});
+			return;
+		}
+
+		if (!editTransactionResult.formError) {
+			return;
+		}
+
+		setToast({
+			id: Date.now(),
+			kind: "error",
+			message: editTransactionResult.formError,
+		});
+	}, [editTransactionResult]);
+
+	useEffect(() => {
+		if (!isEditModalOpen || editingTransaction || isEditSubmitting) {
+			return;
+		}
+
+		setIsEditModalOpen(false);
+		setEditingTransactionId(null);
+	}, [editingTransaction, isEditModalOpen, isEditSubmitting]);
 
 	useEffect(() => {
 		if (!highlightedTransactionId) {
@@ -555,19 +963,22 @@ export default function Transactions() {
 									<th className="px-5 py-3 text-right text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
 										Amount
 									</th>
-									<th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-										Type
-									</th>
-								</tr>
-							</thead>
-							<tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-								{loaderData.transactions.length === 0 ? (
-									<tr>
-										<td
-											colSpan={5}
-											className="px-5 py-12 text-center text-sm text-slate-500 dark:text-slate-400"
-										>
-											No transactions matched those filters.
+										<th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+											Type
+										</th>
+										<th className="px-5 py-3 text-right text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+											Actions
+										</th>
+									</tr>
+								</thead>
+								<tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+									{loaderData.transactions.length === 0 ? (
+										<tr>
+											<td
+												colSpan={6}
+												className="px-5 py-12 text-center text-sm text-slate-500 dark:text-slate-400"
+											>
+												No transactions matched those filters.
 										</td>
 									</tr>
 								) : (
@@ -599,12 +1010,23 @@ export default function Transactions() {
 												{tx.type === "INCOME" ? "+" : "-"}
 												{currencyFormatter.format(tx.amount)}
 											</td>
-											<td className="px-5 py-4 text-sm text-slate-600 dark:text-slate-300">
-												{tx.type === "INCOME" ? "Income" : "Expense"}
-											</td>
-										</tr>
-									))
-								)}
+												<td className="px-5 py-4 text-sm text-slate-600 dark:text-slate-300">
+													{tx.type === "INCOME" ? "Income" : "Expense"}
+												</td>
+												<td className="px-5 py-4 text-right">
+													<button
+														type="button"
+														onClick={() => {
+															openEditModal(tx.id);
+														}}
+														className="inline-flex min-h-9 items-center justify-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800"
+													>
+														Edit
+													</button>
+												</td>
+											</tr>
+										))
+									)}
 							</tbody>
 						</table>
 					</div>
@@ -668,13 +1090,13 @@ export default function Transactions() {
 										Record a new income or expense entry.
 									</p>
 								</div>
-								<button
-									type="button"
-									onClick={closeCreateModal}
-									disabled={isSubmitting}
-									className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
-									aria-label="Close add transaction dialog"
-								>
+									<button
+										type="button"
+										onClick={closeCreateModal}
+										disabled={isCreateSubmitting}
+										className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+										aria-label="Close add transaction dialog"
+									>
 									<svg
 										aria-hidden="true"
 										viewBox="0 0 20 20"
@@ -691,172 +1113,116 @@ export default function Transactions() {
 								</button>
 							</div>
 
-							<createTransactionFetcher.Form
-								ref={createFormRef}
-								method="post"
-								className="mt-5 grid gap-4 lg:grid-cols-2"
-							>
-								<input
-									type="hidden"
-									name="modalSession"
-									value={createModalSession}
-								/>
-								<label className="space-y-2 lg:col-span-2">
-									<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-										Description
-									</span>
+								<createTransactionFetcher.Form
+									ref={createFormRef}
+									method="post"
+									className="mt-5 grid gap-4 lg:grid-cols-2"
+								>
+									<input type="hidden" name="intent" value="create" />
 									<input
-										type="text"
-										name="description"
-										aria-invalid={fieldErrors.description ? true : undefined}
-										className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+										type="hidden"
+										name="modalSession"
+										value={createModalSession}
 									/>
-									{fieldErrors.description?.[0] ? (
-										<p className="text-sm text-rose-600 dark:text-rose-400">
-											{fieldErrors.description[0]}
-										</p>
-									) : null}
-								</label>
-
-								<label className="space-y-2">
-									<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-										Amount
-									</span>
-									<input
-										type="text"
-										name="amount"
-										inputMode="decimal"
-										placeholder="0.00"
-										aria-invalid={fieldErrors.amount ? true : undefined}
-										className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+									<TransactionFormFields
+										categories={loaderData.categories}
+										defaults={{ date: today, type: "EXPENSE" }}
+										fieldErrors={createFieldErrors}
+										formError={createFormError}
+										isSubmitting={isCreateSubmitting}
+										submitLabel="Save transaction"
+										submittingLabel="Creating..."
 									/>
-									{fieldErrors.amount?.[0] ? (
-										<p className="text-sm text-rose-600 dark:text-rose-400">
-											{fieldErrors.amount[0]}
-										</p>
-									) : null}
-								</label>
-
-								<label className="space-y-2">
-									<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-										Category
-									</span>
-									<div className="relative">
-										<select
-											name="categoryId"
-											defaultValue=""
-											aria-invalid={fieldErrors.categoryId ? true : undefined}
-											className="w-full appearance-none rounded-lg border border-slate-300 bg-white px-4 py-3 pr-11 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
-										>
-											<option value="">Select a category</option>
-											{loaderData.categories.map((category) => (
-												<option key={category.id} value={category.id}>
-													{category.name}
-												</option>
-											))}
-										</select>
-										<svg
-											aria-hidden="true"
-											viewBox="0 0 20 20"
-											className="pointer-events-none absolute top-1/2 right-4 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500"
-										>
-											<path
-												d="M5 7.5 10 12.5 15 7.5"
-												fill="none"
-												stroke="currentColor"
-												strokeLinecap="round"
-												strokeLinejoin="round"
-												strokeWidth="1.8"
-											/>
-										</svg>
-									</div>
-									{fieldErrors.categoryId?.[0] ? (
-										<p className="text-sm text-rose-600 dark:text-rose-400">
-											{fieldErrors.categoryId[0]}
-										</p>
-									) : null}
-								</label>
-
-								<label className="space-y-2">
-									<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-										Type
-									</span>
-									<div className="relative">
-										<select
-											name="type"
-											defaultValue="EXPENSE"
-											aria-invalid={fieldErrors.type ? true : undefined}
-											className="w-full appearance-none rounded-lg border border-slate-300 bg-white px-4 py-3 pr-11 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
-										>
-											<option value="EXPENSE">Expense</option>
-											<option value="INCOME">Income</option>
-										</select>
-										<svg
-											aria-hidden="true"
-											viewBox="0 0 20 20"
-											className="pointer-events-none absolute top-1/2 right-4 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500"
-										>
-											<path
-												d="M5 7.5 10 12.5 15 7.5"
-												fill="none"
-												stroke="currentColor"
-												strokeLinecap="round"
-												strokeLinejoin="round"
-												strokeWidth="1.8"
-											/>
-										</svg>
-									</div>
-									{fieldErrors.type?.[0] ? (
-										<p className="text-sm text-rose-600 dark:text-rose-400">
-											{fieldErrors.type[0]}
-										</p>
-									) : null}
-								</label>
-
-								<label className="space-y-2">
-									<span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-										Date
-									</span>
-									<input
-										type="date"
-										name="date"
-										defaultValue={today}
-										aria-invalid={fieldErrors.date ? true : undefined}
-										className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500 dark:focus:ring-slate-800"
-									/>
-									{fieldErrors.date?.[0] ? (
-										<p className="text-sm text-rose-600 dark:text-rose-400">
-											{fieldErrors.date[0]}
-										</p>
-									) : null}
-								</label>
-
-								<div className="flex items-end lg:col-span-2">
-									<div className="flex flex-col gap-3">
-										<button
-											type="submit"
-											disabled={isSubmitting || loaderData.categories.length === 0}
-											className="inline-flex min-h-12 items-center justify-center rounded-lg bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200 dark:focus:ring-slate-700"
-										>
-											{isSubmitting ? "Creating..." : "Save transaction"}
-										</button>
-										{loaderData.categories.length === 0 ? (
-											<p className="text-sm text-rose-600 dark:text-rose-400">
-												Create a category before adding transactions.
-											</p>
-										) : null}
-										{formError ? (
-											<p className="text-sm text-rose-600 dark:text-rose-400">
-												{formError}
-											</p>
-										) : null}
-									</div>
-								</div>
-							</createTransactionFetcher.Form>
+								</createTransactionFetcher.Form>
+							</div>
 						</div>
-					</div>
-				) : null}
-			</div>
-		</section>
-	);
+					) : null}
+
+					{isEditModalOpen && editingTransaction ? (
+						<div
+							className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+							onClick={closeEditModal}
+						>
+							<div
+								role="dialog"
+								aria-modal="true"
+								aria-labelledby="edit-transaction-title"
+								key={editModalSession}
+								className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl shadow-slate-950/20 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/40"
+								onClick={(event) => {
+									event.stopPropagation();
+								}}
+							>
+								<div className="flex items-start justify-between gap-4">
+									<div>
+										<h2
+											id="edit-transaction-title"
+											className="text-lg font-semibold text-slate-950 dark:text-slate-100"
+										>
+											Edit Transaction
+										</h2>
+										<p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+											Update this transaction entry.
+										</p>
+									</div>
+									<button
+										type="button"
+										onClick={closeEditModal}
+										disabled={isEditSubmitting}
+										className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+										aria-label="Close edit transaction dialog"
+									>
+										<svg
+											aria-hidden="true"
+											viewBox="0 0 20 20"
+											className="h-4 w-4"
+										>
+											<path
+												d="m5 5 10 10M15 5 5 15"
+												fill="none"
+												stroke="currentColor"
+												strokeLinecap="round"
+												strokeWidth="1.8"
+											/>
+										</svg>
+									</button>
+								</div>
+
+								<editTransactionFetcher.Form
+									method="post"
+									className="mt-5 grid gap-4 lg:grid-cols-2"
+								>
+									<input type="hidden" name="intent" value="edit" />
+									<input
+										type="hidden"
+										name="modalSession"
+										value={editModalSession}
+									/>
+									<input
+										type="hidden"
+										name="transactionId"
+										value={editingTransaction.id}
+									/>
+									<TransactionFormFields
+										categories={loaderData.categories}
+										defaults={{
+											description: editingTransaction.description,
+											amount: formatAmountInputValue(editingTransaction.amount),
+											categoryId: editingTransaction.category.id,
+											type: editingTransaction.type,
+											date: formatStoredDateInputValue(editingTransaction.date),
+										}}
+										fieldErrors={editFieldErrors}
+										formError={editFormError}
+										isSubmitting={isEditSubmitting}
+										submitLabel="Save changes"
+										submittingLabel="Saving..."
+									/>
+								</editTransactionFetcher.Form>
+							</div>
+						</div>
+					) : null}
+				</div>
+			</section>
+		);
 }
