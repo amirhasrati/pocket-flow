@@ -14,13 +14,62 @@ datasource db {
 }
 
 model User {
-  id           String        @id @default(uuid())
-  email        String        @unique
-  passwordHash String
-  createdAt    DateTime      @default(now())
-  transactions Transaction[]
-  categories   Category[]
-  budgets      Budget[]
+  id            String        @id @default(uuid())
+  name          String
+  email         String        @unique
+  emailVerified Boolean       @default(false)
+  image         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  transactions  Transaction[]
+  categories    Category[]
+  budgets       Budget[]
+  sessions      Session[]
+  accounts      Account[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
 }
 
 model Category {
@@ -30,6 +79,7 @@ model Category {
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   transactions Transaction[]
   budgets      Budget[]
+
   @@unique([id, userId])
   @@unique([userId, name])
 }
@@ -65,6 +115,7 @@ model Transaction {
   createdAt   DateTime        @default(now())
   user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   category    Category        @relation(fields: [categoryId, userId], references: [id, userId], onDelete: Restrict)
+
   @@index([userId, date])
   @@index([userId, categoryId])
   @@index([userId, type, date])
@@ -80,7 +131,8 @@ model Budget {
   createdAt  DateTime    @default(now())
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   category   Category    @relation(fields: [categoryId, userId], references: [id, userId], onDelete: Restrict)
+
+  @@unique([userId, categoryId, month, year])
   @@index([userId, year, month])
   @@index([userId, categoryId])
-  @@unique([userId, categoryId, month, year])
 }

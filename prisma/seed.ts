@@ -12,8 +12,8 @@ if (!process.env.DATABASE_URL) {
 }
 
 const DEMO_USER = {
+	name: "Demo User",
 	email: "demo@pocketflow.local",
-	passwordHash: "seeded-demo-password-hash",
 };
 
 const CATEGORY_NAMES = [
@@ -348,7 +348,7 @@ async function main() {
 	const result = await db.$transaction(async (tx) => {
 		const user = await tx.user.upsert({
 			where: { email: DEMO_USER.email },
-			update: { passwordHash: DEMO_USER.passwordHash },
+			update: { name: DEMO_USER.name },
 			create: DEMO_USER,
 		});
 
